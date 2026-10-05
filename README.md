@@ -2,9 +2,10 @@
 
 [![OCaml 5.x](https://img.shields.io/badge/OCaml-5.x-orange.svg?style=flat-square&logo=ocaml)](https://ocaml.org)
 [![Dune 3.x](https://img.shields.io/badge/Build%20System-Dune%203.x-blue.svg?style=flat-square)](https://dune.build)
-[![CI Status](https://img.shields.io/badge/CI-Passing%20(39%2F39%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
+[![CI Status](https://img.shields.io/badge/CI-Passing%20(57%2F57%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
 [![Zero Wildcards](https://img.shields.io/badge/Pattern%20Matching-100%25%20Exhaustive-blueviolet.svg?style=flat-square)](#engineering-policy--rules)
-[![WAL Persistence](https://img.shields.io/badge/Persistence-JSON--Lines%20WAL-success.svg?style=flat-square)](#phase-2-persistence--wal-architecture)
+[![WAL Compaction](https://img.shields.io/badge/Compaction-Atomic%20Snapshots%20%26%20Rotation-success.svg?style=flat-square)](#phase-3-wal-compaction--atomic-rotation)
+[![Docker Scratch](https://img.shields.io/badge/Container-1.64MB%20Scratch-blue.svg?style=flat-square)](#container-distribution--scratch-image)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
 > High-integrity, strictly typed idempotent event ingestion engine built in OCaml 5.x and Dune. Implements an explicit four-state lifecycle with Algebraic Data Types (ADTs), purely functional immutable state transitions, zero-exception safety, and durable Write-Ahead Logging (WAL) for cold-boot crash recovery.
@@ -238,9 +239,71 @@ Test Suite 7: Write-Ahead Log (WAL) Replay & Invariants
   [PASS] Engine seen count incremented to 3
   [PASS] Temporary WAL cleaned up
 
+Test Suite 8: WAL Rotation & Snapshot Recovery
+  [PASS] should_rotate is false when WAL does not exist
+  [PASS] should_rotate is false under 150 bytes
+  [PASS] should_rotate flips to true once WAL crosses 150 bytes
+  [PASS] create_snapshot succeeded
+  [PASS] snapshot.json exists
+  [PASS] snapshot.json.tmp does not remain
+  [PASS] snapshot.json contains snap-1
+  [PASS] snapshot.json contains snap-5
+  [PASS] rotate_wal succeeded
+  [PASS] events.jsonl.1 exists
+  [PASS] snapshot.json exists after rotation
+  [PASS] active events.jsonl exists
+  [PASS] active events.jsonl is reset to 0 bytes
+  [PASS] Recovered engine contains snap-1 from snapshot
+  [PASS] Recovered engine contains snap-5 from snapshot
+  [PASS] Recovered engine contains post-rot-delta from active WAL
+  [PASS] Recovered engine seen count is at least 6
+  [PASS] Ingesting snap-3 into recovered engine yields Duplicate
+
 ========================================
- Result: 39 / 39 tests passed successfully.
+ Result: 57 / 57 tests passed successfully.
 ========================================
+```
+
+---
+
+## 🔄 Phase 3: WAL Compaction & Atomic Rotation
+
+To prevent unbounded log file growth while guaranteeing zero data loss, the engine incorporates bounded rotation and two-tier recovery:
+
+1. **Size-Triggered Checkpoint**: When `events.jsonl` crosses `max_log_bytes` (default: 10MB, configurable), compaction triggers.
+2. **Crash-Safe Temporary Snapshot**: Engine state (`seen_ids` and timestamp) is flushed to `snapshot.json.tmp` and atomically renamed to `snapshot.json`.
+3. **Atomic Archive Rotation**: `events.jsonl` is atomically renamed to `events.jsonl.1`, and a clean active log is opened for incoming ingress.
+4. **Two-Tier Cold Boot Recovery**:
+   - Ingest `snapshot.json` (if present) to reconstruct base state.
+   - Replay archived tail writes (`events.jsonl.1`) if a rotation was in flight during power loss.
+   - Replay active log (`events.jsonl`) to apply uncompacted deltas.
+
+---
+
+## 🐳 Container Distribution & Scratch Image
+
+The engine compiles via musl libc into a static, zero-dependency native ELF binary and packages onto an empty `scratch` image with **zero OS bloat**:
+
+- **Registry Image:** `ghcr.io/freefades2black/ocaml-event-engine:latest`
+- **Total Image Size:** **1.64 MB** disk footprint (compressed layer: **480 kB**)
+- **Dynamic Linker Dependencies:** Zero (`Not a valid dynamic program`)
+
+### Run via Docker
+```bash
+docker run --rm -i ghcr.io/freefades2black/ocaml-event-engine:latest << 'EOF'
+{"id":"evt-001","timestamp":1728100000,"payload":"sensor_payload_active"}
+{"id":"evt-001","timestamp":1728100005,"payload":"sensor_payload_active"}
+{"id":"","timestamp":1728100010,"payload":"invalid_record"}
+{"id":"evt-002","timestamp":1728100015,"payload":"new_sensor_record"}
+EOF
+```
+
+Output:
+```json
+{"status":"processed","id":"evt-001"}
+{"status":"duplicate","id":"evt-001"}
+{"status":"invalid","id":"","error":"Event ID cannot be blank"}
+{"status":"processed","id":"evt-002"}
 ```
 
 ---

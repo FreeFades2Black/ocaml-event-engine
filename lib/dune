@@ -1,4 +1,5 @@
 (library
  (name event_engine)
  (public_name ocaml_event_engine.event_engine)
+ (libraries unix)
  (flags (:standard -warn-error +A-44)))

@@ -1,6 +1,11 @@
 open Event_engine
 
-let log_file = "events.jsonl"
+let config : compaction_config = {
+  max_log_bytes = 10_485_760;
+  base_dir = ".";
+}
+
+let wal_path = Filename.concat config.base_dir "events.jsonl"
 
 let rec process_loop (engine : engine) : unit =
   match input_line stdin with
@@ -17,28 +22,37 @@ let rec process_loop (engine : engine) : unit =
               engine
           | Ok raw ->
               let updated_engine, res_state = ingest engine raw in
-              (match res_state with
-              | Processed proc ->
-                  append_event log_file
-                    {
-                      id = proc.id;
-                      timestamp = proc.timestamp;
-                      payload = proc.payload;
-                    }
-              | Duplicate { id = _; timestamp = _ } ->
-                  ()
-              | Invalid { id = _; error = _ } ->
-                  ()
-              | Received { id = _; timestamp = _; payload = _ } ->
-                  ());
+              let engine_after_commit =
+                match res_state with
+                | Processed proc ->
+                    append_event wal_path
+                      {
+                        id = proc.id;
+                        timestamp = proc.timestamp;
+                        payload = proc.payload;
+                      };
+                    if should_rotate ~config ~wal_path then
+                      match rotate_wal ~config updated_engine with
+                      | Ok rot_eng -> rot_eng
+                      | Error _ -> updated_engine
+                    else updated_engine
+                | Duplicate { id = _; timestamp = _ } -> updated_engine
+                | Invalid { id = _; error = _ } -> updated_engine
+                | Received { id = _; timestamp = _; payload = _ } ->
+                    updated_engine
+              in
               print_endline (status_to_json res_state);
               flush stdout;
-              updated_engine
+              engine_after_commit
       in
       process_loop next_engine
   | exception End_of_file ->
       ()
 
 let () =
-  let initial_engine = replay_log log_file empty in
+  let initial_engine =
+    match recover ~config with
+    | Ok eng -> eng
+    | Error _ -> empty
+  in
   process_loop initial_engine

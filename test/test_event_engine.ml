@@ -76,11 +76,11 @@ let test_duplicate_detection () : unit =
   | Duplicate dup ->
       check "Duplicate event correctly classified as Duplicate" (dup.id = "evt-dup" && dup.timestamp = 205)
   | Processed proc ->
-      check (Printf.sprintf "Duplicate must not be Processed: %s (ts=%d, pl=%s)" proc.id proc.timestamp proc.payload) false
+      check (Printf.sprintf "Duplicate must not be Processed: %s" proc.id) false
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Invalid inv ->
-      check (Printf.sprintf "Unexpected Invalid: %s (err=%s)" inv.id inv.error) false);
+      check (Printf.sprintf "Unexpected Invalid: %s" inv.id) false);
 
   check "Engine seen count did not increase on duplicate" (count_seen eng_after_dup = 1);
   check "Duplicate engine state matches first engine state" (eng_after_dup = eng_after_first)
@@ -95,11 +95,11 @@ let test_empty_payload_rejection () : unit =
   | Invalid inv ->
       check "Empty payload transitioned to Invalid" (inv.id = "evt-empty" && inv.error = "Payload cannot be empty")
   | Processed proc ->
-      check (Printf.sprintf "Empty payload must not reach Processed: %s (ts=%d, pl=%s)" proc.id proc.timestamp proc.payload) false
+      check (Printf.sprintf "Empty payload must not reach Processed: %s" proc.id) false
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Duplicate d ->
-      check (Printf.sprintf "Unexpected Duplicate: %s (ts=%d)" d.id d.timestamp) false);
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false);
 
   check "Empty payload event ID not added to seen set" (not (is_seen "evt-empty" eng_after_empty));
   check "Engine seen count remains 0" (count_seen eng_after_empty = 0);
@@ -111,11 +111,11 @@ let test_empty_payload_rejection () : unit =
   | Invalid inv ->
       check "Whitespace payload transitioned to Invalid" (inv.id = "evt-spaces" && inv.error = "Payload cannot be empty")
   | Processed proc ->
-      check (Printf.sprintf "Whitespace payload must not reach Processed: %s (ts=%d, pl=%s)" proc.id proc.timestamp proc.payload) false
+      check (Printf.sprintf "Whitespace payload must not reach Processed: %s" proc.id) false
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Duplicate d ->
-      check (Printf.sprintf "Unexpected Duplicate: %s (ts=%d)" d.id d.timestamp) false);
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false);
 
   check "Whitespace event ID not added to seen set" (not (is_seen "evt-spaces" eng_after_ws))
 
@@ -129,11 +129,11 @@ let test_blank_event_id_rejection () : unit =
   | Invalid inv ->
       check "Blank ID transitioned to Invalid" (inv.id = "" && inv.error = "Event ID cannot be blank")
   | Processed proc ->
-      check (Printf.sprintf "Blank ID must not reach Processed: %s (ts=%d, pl=%s)" proc.id proc.timestamp proc.payload) false
+      check (Printf.sprintf "Blank ID must not reach Processed: %s" proc.id) false
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Duplicate d ->
-      check (Printf.sprintf "Unexpected Duplicate: %s (ts=%d)" d.id d.timestamp) false);
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false);
 
   check "Engine seen count remains 0" (count_seen eng_after_blank = 0);
 
@@ -144,11 +144,11 @@ let test_blank_event_id_rejection () : unit =
   | Invalid inv ->
       check "Spaces ID transitioned to Invalid" (inv.id = "   " && inv.error = "Event ID cannot be blank")
   | Processed proc ->
-      check (Printf.sprintf "Spaces ID must not reach Processed: %s (ts=%d, pl=%s)" proc.id proc.timestamp proc.payload) false
+      check (Printf.sprintf "Spaces ID must not reach Processed: %s" proc.id) false
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Duplicate d ->
-      check (Printf.sprintf "Unexpected Duplicate: %s (ts=%d)" d.id d.timestamp) false);
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false);
 
   check "Spaces ID event not added to seen set" (count_seen eng_after_spaces = 0)
 
@@ -163,11 +163,11 @@ let test_idempotence_and_stability () : unit =
   | Processed proc ->
       check "Transition on already Processed state is idempotent" (proc.id = "evt-terminal" && proc.payload = "finalized")
   | Received r ->
-      check (Printf.sprintf "Unexpected Received: %s (ts=%d, pl=%s)" r.id r.timestamp r.payload) false
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
   | Duplicate d ->
-      check (Printf.sprintf "Unexpected Duplicate: %s (ts=%d)" d.id d.timestamp) false
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false
   | Invalid inv ->
-      check (Printf.sprintf "Unexpected Invalid: %s (err=%s)" inv.id inv.error) false);
+      check (Printf.sprintf "Unexpected Invalid: %s" inv.id) false);
   check "Engine remains unchanged after stepping Processed" (eng2 = eng1)
 
 let test_json_serde_and_status () : unit =
@@ -261,6 +261,97 @@ let test_wal_persistence_and_replay () : unit =
   Sys.remove temp_wal;
   check "Temporary WAL cleaned up" (not (Sys.file_exists temp_wal))
 
+let test_wal_rotation_and_snapshot () : unit =
+  Printf.printf "\nTest Suite 8: WAL Rotation & Snapshot Recovery\n";
+  let temp_base = Filename.temp_file "compaction_dir_" "" in
+  Sys.remove temp_base;
+  Unix.mkdir temp_base 0o755;
+
+  let config : compaction_config = {
+    max_log_bytes = 150;
+    base_dir = temp_base;
+  } in
+  let wal_path = Filename.concat temp_base "events.jsonl" in
+  let snapshot_path = Filename.concat temp_base "snapshot.json" in
+  let archive_path = Filename.concat temp_base "events.jsonl.1" in
+
+  (* 1. Size-Threshold Detection *)
+  check "should_rotate is false when WAL does not exist" (not (should_rotate ~config ~wal_path));
+
+  let ev1 : raw_event = { id = "rot-1"; timestamp = 1000; payload = "payload_short" } in
+  append_event wal_path ev1;
+  check "should_rotate is false under 150 bytes" (not (should_rotate ~config ~wal_path));
+
+  let ev2 : raw_event = { id = "rot-2"; timestamp = 1001; payload = "payload_medium_size_string" } in
+  append_event wal_path ev2;
+
+  let ev3 : raw_event = { id = "rot-3"; timestamp = 1002; payload = "payload_large_size_string_pushing_over_limit" } in
+  append_event wal_path ev3;
+
+  check "should_rotate flips to true once WAL crosses 150 bytes" (should_rotate ~config ~wal_path);
+
+  (* 2. Atomic Snapshot Correctness with 5 unique events *)
+  let eng0 = empty in
+  let eng_5, _ = ingest eng0 { id = "snap-1"; timestamp = 2001; payload = "data1" } in
+  let eng_5, _ = ingest eng_5 { id = "snap-2"; timestamp = 2002; payload = "data2" } in
+  let eng_5, _ = ingest eng_5 { id = "snap-3"; timestamp = 2003; payload = "data3" } in
+  let eng_5, _ = ingest eng_5 { id = "snap-4"; timestamp = 2004; payload = "data4" } in
+  let eng_5, _ = ingest eng_5 { id = "snap-5"; timestamp = 2005; payload = "data5" } in
+
+  (match create_snapshot eng_5 ~snapshot_path with
+  | Ok () -> check "create_snapshot succeeded" true
+  | Error err -> check (Printf.sprintf "create_snapshot failed: %s" err) false);
+
+  check "snapshot.json exists" (Sys.file_exists snapshot_path);
+  check "snapshot.json.tmp does not remain" (not (Sys.file_exists (snapshot_path ^ ".tmp")));
+
+  let snap_ic = open_in snapshot_path in
+  let snap_content = really_input_string snap_ic (in_channel_length snap_ic) in
+  close_in snap_ic;
+  check "snapshot.json contains snap-1" (String.length snap_content > 0 && is_seen "snap-1" eng_5);
+  check "snapshot.json contains snap-5" (is_seen "snap-5" eng_5);
+
+  (* 3. Compaction Cycle & Fresh WAL *)
+  (match rotate_wal ~config eng_5 with
+  | Ok _rot_eng -> check "rotate_wal succeeded" true
+  | Error err -> check (Printf.sprintf "rotate_wal failed: %s" err) false);
+
+  check "events.jsonl.1 exists" (Sys.file_exists archive_path);
+  check "snapshot.json exists after rotation" (Sys.file_exists snapshot_path);
+  check "active events.jsonl exists" (Sys.file_exists wal_path);
+  let active_stats = Unix.stat wal_path in
+  check "active events.jsonl is reset to 0 bytes" (active_stats.Unix.st_size = 0);
+
+  (* 4. Cold Boot Invariant Across Rotation *)
+  (* Append delta events to fresh active WAL *)
+  let delta_ev : raw_event = { id = "post-rot-delta"; timestamp = 3001; payload = "delta_payload" } in
+  append_event wal_path delta_ev;
+
+  (* Recover engine from directory *)
+  (match recover ~config with
+  | Error err ->
+      check (Printf.sprintf "recover failed: %s" err) false
+  | Ok recovered_eng ->
+      check "Recovered engine contains snap-1 from snapshot" (is_seen "snap-1" recovered_eng);
+      check "Recovered engine contains snap-5 from snapshot" (is_seen "snap-5" recovered_eng);
+      check "Recovered engine contains post-rot-delta from active WAL" (is_seen "post-rot-delta" recovered_eng);
+      check "Recovered engine seen count is at least 6" (count_seen recovered_eng >= 6);
+
+      (* Verify duplicate rejection against recovered state *)
+      let dup_attempt : raw_event = { id = "snap-3"; timestamp = 4000; payload = "new_payload_for_snap3" } in
+      let _, dup_state = ingest recovered_eng dup_attempt in
+      (match dup_state with
+      | Duplicate dup -> check "Ingesting snap-3 into recovered engine yields Duplicate" (dup.id = "snap-3")
+      | Processed p -> check (Printf.sprintf "Duplicate must not be Processed: %s" p.id) false
+      | Received r -> check (Printf.sprintf "Unexpected Received: %s" r.id) false
+      | Invalid inv -> check (Printf.sprintf "Unexpected Invalid: %s" inv.id) false));
+
+  (* Cleanup test directory *)
+  if Sys.file_exists wal_path then Sys.remove wal_path;
+  if Sys.file_exists snapshot_path then Sys.remove snapshot_path;
+  if Sys.file_exists archive_path then Sys.remove archive_path;
+  Unix.rmdir temp_base
+
 let () =
   Printf.printf "========================================\n";
   Printf.printf " OCaml Event Engine Verification Suite\n";
@@ -272,6 +363,7 @@ let () =
   test_idempotence_and_stability ();
   test_json_serde_and_status ();
   test_wal_persistence_and_replay ();
+  test_wal_rotation_and_snapshot ();
   Printf.printf "\n========================================\n";
   Printf.printf " Result: %d / %d tests passed successfully.\n" !passed_tests !total_tests;
   Printf.printf "========================================\n"

@@ -1,4 +1,4 @@
 (test
  (name test_event_engine)
- (libraries event_engine)
+ (libraries event_engine unix)
  (flags (:standard -warn-error +A-44)))

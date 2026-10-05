@@ -16,6 +16,11 @@ type engine = {
   seen_ids : StringSet.t;
 }
 
+type compaction_config = {
+  max_log_bytes : int;
+  base_dir : string;
+}
+
 let empty : engine = {
   seen_ids = StringSet.empty;
 }
@@ -103,6 +108,8 @@ let status_to_json (s : state) : string =
 type token =
   | Tok_LBrace
   | Tok_RBrace
+  | Tok_LBracket
+  | Tok_RBracket
   | Tok_Colon
   | Tok_Comma
   | Tok_String of string
@@ -118,6 +125,8 @@ let tokenize (s : string) : (token list, string) result =
       | ' ' | '\t' | '\r' | '\n' -> scan (idx + 1) acc
       | '{' -> scan (idx + 1) (Tok_LBrace :: acc)
       | '}' -> scan (idx + 1) (Tok_RBrace :: acc)
+      | '[' -> scan (idx + 1) (Tok_LBracket :: acc)
+      | ']' -> scan (idx + 1) (Tok_RBracket :: acc)
       | ':' -> scan (idx + 1) (Tok_Colon :: acc)
       | ',' -> scan (idx + 1) (Tok_Comma :: acc)
       | '"' ->
@@ -169,6 +178,7 @@ let tokenize (s : string) : (token list, string) result =
               j < len
               && s.[j] <> ','
               && s.[j] <> '}'
+              && s.[j] <> ']'
               && s.[j] <> ' '
               && s.[j] <> '\t'
               && s.[j] <> '\r'
@@ -261,3 +271,105 @@ let replay_log (path : string) (engine : engine) : engine =
       ignore exn;
       close_in_noerr ic;
       engine
+
+let should_rotate ~(config : compaction_config) ~(wal_path : string) : bool =
+  try
+    let stats = Unix.stat wal_path in
+    stats.Unix.st_size >= config.max_log_bytes
+  with
+  | Unix.Unix_error (Unix.ENOENT, _, _) -> false
+  | exn ->
+      ignore exn;
+      false
+
+let create_snapshot (eng : engine) ~(snapshot_path : string) :
+    (unit, string) result =
+  let tmp_path = snapshot_path ^ ".tmp" in
+  try
+    let oc = open_out_gen [ Open_wronly; Open_creat; Open_trunc ] 0o644 tmp_path in
+    output_string oc "{\"seen_ids\":[";
+    let first = ref true in
+    StringSet.iter
+      (fun id ->
+        if not !first then output_string oc "," else first := false;
+        Printf.fprintf oc "\"%s\"" (json_escape id))
+      eng.seen_ids;
+    output_string oc "]}\n";
+    flush oc;
+    close_out oc;
+    Sys.rename tmp_path snapshot_path;
+    Ok ()
+  with
+  | Sys_error err -> Error ("Snapshot failure: " ^ err)
+  | exn -> Error ("Unexpected snapshot failure: " ^ Printexc.to_string exn)
+
+let load_snapshot (path : string) (eng : engine) : (engine, string) result =
+  if not (Sys.file_exists path) then Ok eng
+  else
+    try
+      let ic = open_in path in
+      let content = really_input_string ic (in_channel_length ic) in
+      close_in ic;
+      match tokenize content with
+      | Error err -> Error ("Snapshot tokenization error: " ^ err)
+      | Ok tokens ->
+          let rec parse_ids toks acc in_seen_ids =
+            match toks with
+            | [] -> Ok { seen_ids = acc }
+            | Tok_String "seen_ids" :: Tok_Colon :: Tok_LBracket :: rest ->
+                parse_ids rest acc true
+            | Tok_String id :: rest when in_seen_ids ->
+                parse_ids rest (StringSet.add id acc) true
+            | Tok_RBracket :: rest ->
+                parse_ids rest acc false
+            | _other :: rest ->
+                parse_ids rest acc in_seen_ids
+          in
+          parse_ids tokens eng.seen_ids false
+    with
+    | Sys_error err -> Error ("Failed to read snapshot: " ^ err)
+    | exn -> Error ("Unexpected error loading snapshot: " ^ Printexc.to_string exn)
+
+let rotate_wal ~(config : compaction_config) (eng : engine) :
+    (engine, string) result =
+  let wal_path = Filename.concat config.base_dir "events.jsonl" in
+  let snapshot_path = Filename.concat config.base_dir "snapshot.json" in
+  let wal_archive = Filename.concat config.base_dir "events.jsonl.1" in
+  match create_snapshot eng ~snapshot_path with
+  | Error err -> Error err
+  | Ok () -> (
+      try
+        if Sys.file_exists wal_path then Sys.rename wal_path wal_archive;
+        let oc =
+          open_out_gen [ Open_wronly; Open_creat; Open_trunc ] 0o644 wal_path
+        in
+        flush oc;
+        close_out oc;
+        Ok eng
+      with
+      | Sys_error err -> Error ("WAL rotation failure: " ^ err)
+      | exn ->
+          Error ("Unexpected WAL rotation failure: " ^ Printexc.to_string exn))
+
+let recover ~(config : compaction_config) : (engine, string) result =
+  let wal_path = Filename.concat config.base_dir "events.jsonl" in
+  let snapshot_path = Filename.concat config.base_dir "snapshot.json" in
+  let wal_archive = Filename.concat config.base_dir "events.jsonl.1" in
+  let base_engine = empty in
+  let snapshot_res =
+    if Sys.file_exists snapshot_path then
+      load_snapshot snapshot_path base_engine
+    else Ok base_engine
+  in
+  match snapshot_res with
+  | Error err -> Error err
+  | Ok eng_snap ->
+      let eng_archive =
+        if Sys.file_exists wal_archive then replay_log wal_archive eng_snap
+        else eng_snap
+      in
+      let eng_final =
+        if Sys.file_exists wal_path then replay_log wal_path eng_archive
+        else eng_archive
+      in
+      Ok eng_final

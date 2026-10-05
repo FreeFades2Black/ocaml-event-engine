@@ -1,7 +1,8 @@
 (** Idempotent Event Ingestion Engine
 
     Strict four-state lifecycle with explicit algebraic data types,
-    zero wildcard pattern matching, and durable write-ahead logging. *)
+    zero wildcard pattern matching, durable write-ahead logging,
+    and atomic WAL compaction with snapshot checkpointing. *)
 
 module StringSet : Set.S with type elt = string
 
@@ -22,6 +23,12 @@ type state =
 (** The state of the ingestion engine holding seen event IDs *)
 type engine = {
   seen_ids : StringSet.t;
+}
+
+(** Configuration parameters for WAL compaction and log rotation *)
+type compaction_config = {
+  max_log_bytes : int;
+  base_dir : string;
 }
 
 (** [empty] creates an initial engine state with an empty seen set *)
@@ -64,3 +71,23 @@ val append_event : string -> raw_event -> unit
 (** [replay_log log_path engine] reconstructs [engine.seen_ids] by reading [log_path]
     line-by-line without re-emitting side effects. Returns [engine] if [log_path] does not exist. *)
 val replay_log : string -> engine -> engine
+
+(** [should_rotate ~config ~wal_path] checks whether the file size of [wal_path]
+    has met or exceeded [config.max_log_bytes]. *)
+val should_rotate : config:compaction_config -> wal_path:string -> bool
+
+(** [create_snapshot engine ~snapshot_path] writes an atomic JSON snapshot of all
+    [seen_ids] via a temporary file ([snapshot.json.tmp]) followed by an atomic rename. *)
+val create_snapshot : engine -> snapshot_path:string -> (unit, string) result
+
+(** [rotate_wal ~config engine] executes atomic log rotation:
+    1. Creates atomic [snapshot.json].
+    2. Renames active [events.jsonl] to [events.jsonl.1].
+    3. Re-opens a fresh empty [events.jsonl]. *)
+val rotate_wal : config:compaction_config -> engine -> (engine, string) result
+
+(** [recover ~config] executes two-tier cold-boot recovery:
+    1. Ingests [snapshot.json] if present.
+    2. Replays [events.jsonl.1] if present.
+    3. Replays active [events.jsonl] if present. *)
+val recover : config:compaction_config -> (engine, string) result

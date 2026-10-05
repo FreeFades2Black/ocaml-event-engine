@@ -2,4 +2,5 @@
  (name main)
  (public_name ocaml-event-engine)
  (libraries event_engine)
- (flags (:standard -warn-error +A-44)))
+ (flags (-ccopt -static -ccopt -no-pie))
+ (link_flags (-ccopt -static -ccopt -no-pie)))
