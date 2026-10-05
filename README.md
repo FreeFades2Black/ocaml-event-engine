@@ -2,11 +2,12 @@
 
 [![OCaml 5.x](https://img.shields.io/badge/OCaml-5.x-orange.svg?style=flat-square&logo=ocaml)](https://ocaml.org)
 [![Dune 3.x](https://img.shields.io/badge/Build%20System-Dune%203.x-blue.svg?style=flat-square)](https://dune.build)
-[![CI Status](https://img.shields.io/badge/CI-Passing%20(23%2F23%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
+[![CI Status](https://img.shields.io/badge/CI-Passing%20(39%2F39%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
 [![Zero Wildcards](https://img.shields.io/badge/Pattern%20Matching-100%25%20Exhaustive-blueviolet.svg?style=flat-square)](#engineering-policy--rules)
+[![WAL Persistence](https://img.shields.io/badge/Persistence-JSON--Lines%20WAL-success.svg?style=flat-square)](#phase-2-persistence--wal-architecture)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-> High-integrity, strictly typed idempotent event ingestion engine built in OCaml 5.x and Dune. Implements an explicit four-state lifecycle with Algebraic Data Types (ADTs), purely functional immutable state transitions, zero-exception safety, and formal deduplication invariants.
+> High-integrity, strictly typed idempotent event ingestion engine built in OCaml 5.x and Dune. Implements an explicit four-state lifecycle with Algebraic Data Types (ADTs), purely functional immutable state transitions, zero-exception safety, and durable Write-Ahead Logging (WAL) for cold-boot crash recovery.
 
 **Lead Architect:** William Free Hall (Free) • [whall4.wh@gmail.com](mailto:whall4.wh@gmail.com) • [LinkedIn](https://linkedin.com/in/william-free-hall)  
 **System Specification:** [SYSTEM_SPEC.md](SYSTEM_SPEC.md) • **Agent Rules & Policy:** [.agents/rules](.agents/rules)
@@ -30,7 +31,7 @@ stateDiagram-v2
 
     Invalid --> [*]: Discard (Error captured, SeenSet unchanged)
     Duplicate --> [*]: Discard (SeenSet unchanged)
-    Processed --> [*]: SeenSet ← SeenSet ∪ {id} (Terminal)
+    Processed --> [*]: SeenSet ← SeenSet ∪ {id} & Append to WAL (Terminal)
 ```
 
 ### Transition Matrix
@@ -40,10 +41,44 @@ stateDiagram-v2
 | `Received(evt)` | `trim(id) == ""` | `Invalid { id; error = "Event ID cannot be blank" }` | None | Discarded, error reported |
 | `Received(evt)` | `trim(payload) == ""` | `Invalid { id; error = "Payload cannot be empty" }` | None | Discarded, error reported |
 | `Received(evt)` | `id ∈ seen_ids` | `Duplicate { id; timestamp }` | None | Discarded, deduplicated |
-| `Received(evt)` | `id ∉ seen_ids` | `Processed { id; timestamp; payload }` | `seen_ids + id` | Committed to seen store |
+| `Received(evt)` | `id ∉ seen_ids` | `Processed { id; timestamp; payload }` | `seen_ids + id` | Committed to seen store & appended to WAL |
 | `Processed` | Any | `Processed` (Idempotent) | None | Identity step |
 | `Duplicate` | Any | `Duplicate` (Idempotent) | None | Identity step |
 | `Invalid` | Any | `Invalid` (Idempotent) | None | Identity step |
+
+---
+
+## 💾 Phase 2: Persistence & WAL Architecture
+
+To survive process restarts and integrate with standard UNIX streaming pipelines without external database dependencies, the engine implements an append-only Write-Ahead Log (`events.jsonl`):
+
+```mermaid
+flowchart TD
+    Stdin["Incoming Events via stdin (JSON Lines)"] --> Ingress["CLI Ingress Stream (bin/main.ml)"]
+    Ingress --> Engine["OCaml Event Engine"]
+    
+    Engine -->|Validation Failure| Inv["Invalid State"]
+    Inv --> OutInv["stdout: {'status':'invalid', ...}"]
+    
+    Engine -->|Seen Before| Dup["Duplicate State"]
+    Dup --> Discard["Discard Payload"]
+    Dup --> OutDup["stdout: {'status':'duplicate', ...}"]
+    
+    Engine -->|New & Valid| Proc["Processed State"]
+    Proc --> WAL["Atomic Append & Flush (events.jsonl)"]
+    Proc --> OutProc["stdout: {'status':'processed', ...}"]
+    
+    subgraph ColdBoot ["Cold Boot Recovery"]
+        DiskLog["events.jsonl on Disk"] -->|Replay Line-by-Line| Replay["replay_log (Rebuild seen_ids)"]
+        Replay --> ReadyEngine["Warm Engine (Zero Side-Effects)"]
+    end
+    ReadyEngine -.-> Engine
+```
+
+### Key Durability Invariants
+1. **Cold Boot Recovery**: On startup, `replay_log` populates `engine.seen_ids` before ingress opens. No side effects are re-emitted during recovery.
+2. **Atomic Append & Flush**: Every event reaching `Processed` appends a serialized JSON line to `events.jsonl` with an explicit flush (`flush oc`) to prevent partial line writes during crash events.
+3. **Idempotent Crash Semantics**: If interrupted mid-flight, uncommitted events are safely deduplicated or processed cleanly upon reboot without corrupting state.
 
 ---
 
@@ -52,11 +87,12 @@ stateDiagram-v2
 1. **Deduplication Invariant**: No duplicate event ID may ever enter the `Processed` state. Subsequent arrivals with an identical ID are safely categorized as `Duplicate` and discarded.
 2. **Payload Hygiene Invariant**: Empty or whitespace-only payloads never reach `Processed`. They are classified as `Invalid`.
 3. **Identifier Validity Invariant**: Blank or whitespace-only event IDs are immediately rejected into `Invalid`.
-4. **Zero-Exception Policy**: State transitions never raise exceptions (`raise`, `failwith`, `assert`). All outcomes return an explicit `(engine * state)` tuple.
+4. **Zero-Exception Policy**: State transitions never raise exceptions (`raise`, `failwith`, `assert`). All outcomes return explicit variants or Result types.
 5. **Zero Wildcard Catch-Alls (`_`)**: In accordance with the engineering policy, all pattern matching across states is 100% exhaustive. Constructor matching explicitly binds all fields, ensuring the compiler guarantees exhaustive state coverage.
 6. **Complexity Guarantees**:
    * **Deduplication Lookup**: $\mathcal{O}(\log N)$ persistent set membership via Red-Black/AVL balanced binary tree (`Set.Make(String)`).
-   * **Storage & Concurrency**: 100% immutable and thread-safe.
+   * **WAL Write Overhead**: $\mathcal{O}(1)$ sequential append.
+   * **Thread Safety**: 100% immutable in-memory engine structures.
 
 ---
 
@@ -69,46 +105,61 @@ stateDiagram-v2
 ├── .github/
 │   └── workflows/
 │       └── ci.yml                # Automated Dune build & test CI workflow
+├── bin/
+│   ├── dune                      # Standalone CLI binary compilation rules
+│   └── main.ml                   # Streaming stdin/stdout pipeline with WAL integration
 ├── lib/
-│   ├── dune                      # Strict compilation flags (-warn-error +A-44)
+│   ├── dune                      # Strict library flags (-warn-error +A-44)
 │   ├── event_engine.mli          # Public interface with explicit ADT signatures
-│   └── event_engine.ml           # Pure functional state machine implementation
+│   └── event_engine.ml           # Pure state machine + JSON serde + WAL persistence
 ├── test/
 │   ├── dune                      # Test harness compilation rules
-│   └── test_event_engine.ml      # 23-assertion verification suite
+│   └── test_event_engine.ml      # 39-assertion verification suite (unit + WAL replay)
 ├── dune-project                  # Dune project manifest
-├── SYSTEM_SPEC.md                # Formal system specification
+├── SYSTEM_SPEC.md                # Formal system specification (Phase 1 & Phase 2)
 ├── .gitignore                    # Build artifact exclusions
 └── README.md                     # Engineering documentation
 ```
 
 ---
 
-## 🚀 Quickstart & Usage
+## 🚀 Quickstart & CLI Usage
 
-### Basic Event Processing
+### 1. Interactive Ingress via Terminal / Shell
 
-```ocaml
-open Event_engine
+```bash
+# Run the binary and pipe JSON events into standard input
+dune exec bin/main.exe <<EOF
+{"id":"evt-100","timestamp":1728101000,"payload":"init_record"}
+{"id":"evt-100","timestamp":1728101005,"payload":"duplicate_attempt"}
+{"id":"evt-101","timestamp":1728101010,"payload":"second_event"}
+EOF
+```
 
-(* 1. Initialize an empty engine *)
-let engine0 = empty in
+**Standard Output (`stdout`)**:
+```json
+{"status":"processed","id":"evt-100"}
+{"status":"duplicate","id":"evt-100"}
+{"status":"processed","id":"evt-101"}
+```
 
-(* 2. Ingest a valid event *)
-let event1 = { id = "tx-1001"; timestamp = 1728115200; payload = "TRANSFER $500" } in
-let engine1, state1 = ingest engine0 event1 in
-(* state1 is Processed { id = "tx-1001"; timestamp = 1728115200; payload = "TRANSFER $500" } *)
+**Durable Write-Ahead Log (`events.jsonl`)**:
+```json
+{"id":"evt-100","timestamp":1728101000,"payload":"init_record"}
+{"id":"evt-101","timestamp":1728101010,"payload":"second_event"}
+```
 
-(* 3. Attempt to ingest a duplicate event *)
-let event1_dup = { id = "tx-1001"; timestamp = 1728115205; payload = "TRANSFER $500 (RETRY)" } in
-let engine2, state2 = ingest engine1 event1_dup in
-(* state2 is Duplicate { id = "tx-1001"; timestamp = 1728115205 } *)
-(* engine2 is identical to engine1; seen count remains 1 *)
+### 2. Cold-Boot Crash Recovery Test
 
-(* 4. Ingest an invalid empty payload *)
-let event_invalid = { id = "tx-1002"; timestamp = 1728115210; payload = "   " } in
-let engine3, state3 = ingest engine2 event_invalid in
-(* state3 is Invalid { id = "tx-1002"; error = "Payload cannot be empty" } *)
+Restarting the process against an existing `events.jsonl` log automatically hydrates `seen_ids`:
+```bash
+dune exec bin/main.exe <<EOF
+{"id":"evt-100","timestamp":1728101020,"payload":"re-submitted"}
+EOF
+```
+**Output**:
+```json
+{"status":"duplicate","id":"evt-100"}
 ```
 
 ---
@@ -120,10 +171,10 @@ The codebase enforces strict compiler hygiene with `-warn-error +A-44` (turning 
 ### 1-Command Local Verification
 
 ```bash
-# Build the project and verify type safety
+# Build both the library and CLI executable
 dune build
 
-# Run the 23-assertion test suite
+# Run the 39-assertion test suite
 dune runtest
 ```
 
@@ -167,8 +218,28 @@ Test Suite 5: Idempotence of Terminal States
   [PASS] Transition on already Processed state is idempotent
   [PASS] Engine remains unchanged after stepping Processed
 
+Test Suite 6: JSON Serialization & Status Formats
+  [PASS] event_to_json produces valid JSON string
+  [PASS] event_of_json parsed back correctly
+  [PASS] event_of_json handles permuted key order
+  [PASS] event_of_json cleanly rejects malformed syntax
+  [PASS] status_to_json Processed format
+  [PASS] status_to_json Duplicate format
+  [PASS] status_to_json Invalid format
+
+Test Suite 7: Write-Ahead Log (WAL) Replay & Invariants
+  [PASS] WAL file was created
+  [PASS] Replayed engine has count 2
+  [PASS] Replayed engine recorded evt-wal-1
+  [PASS] Replayed engine recorded evt-wal-2
+  [PASS] Replayed engine correctly transitioned duplicate to Duplicate
+  [PASS] Engine seen count unaffected by duplicate
+  [PASS] New event processed on top of replayed engine
+  [PASS] Engine seen count incremented to 3
+  [PASS] Temporary WAL cleaned up
+
 ========================================
- Result: 23 / 23 tests passed successfully.
+ Result: 39 / 39 tests passed successfully.
 ========================================
 ```
 

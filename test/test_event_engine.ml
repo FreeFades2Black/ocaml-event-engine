@@ -170,6 +170,97 @@ let test_idempotence_and_stability () : unit =
       check (Printf.sprintf "Unexpected Invalid: %s (err=%s)" inv.id inv.error) false);
   check "Engine remains unchanged after stepping Processed" (eng2 = eng1)
 
+let test_json_serde_and_status () : unit =
+  Printf.printf "\nTest Suite 6: JSON Serialization & Status Formats\n";
+  let event : raw_event = { id = "evt-json-1"; timestamp = 1728101000; payload = "order_created" } in
+  let json_str = event_to_json event in
+  check "event_to_json produces valid JSON string"
+    (json_str = "{\"id\":\"evt-json-1\",\"timestamp\":1728101000,\"payload\":\"order_created\"}");
+
+  (match event_of_json json_str with
+  | Ok parsed ->
+      check "event_of_json parsed back correctly"
+        (parsed.id = "evt-json-1" && parsed.timestamp = 1728101000 && parsed.payload = "order_created")
+  | Error err ->
+      check (Printf.sprintf "Failed to parse json: %s" err) false);
+
+  (* Test permuted key order in JSON *)
+  let permuted_json = "{\"payload\":\"order_created\",\"timestamp\":1728101000,\"id\":\"evt-json-1\"}" in
+  (match event_of_json permuted_json with
+  | Ok parsed ->
+      check "event_of_json handles permuted key order" (parsed.id = "evt-json-1")
+  | Error err ->
+      check (Printf.sprintf "Failed to parse permuted json: %s" err) false);
+
+  (* Test invalid JSON parsing *)
+  (match event_of_json "not a json string" with
+  | Ok parsed ->
+      check (Printf.sprintf "Should have failed on malformed json, got %s" parsed.id) false
+  | Error _err ->
+      check "event_of_json cleanly rejects malformed syntax" true);
+
+  (* Test Status JSON formats *)
+  let s_proc = Processed { id = "e1"; timestamp = 100; payload = "ok" } in
+  let s_dup = Duplicate { id = "e1"; timestamp = 105 } in
+  let s_inv = Invalid { id = "e2"; error = "bad payload" } in
+  check "status_to_json Processed format" (status_to_json s_proc = "{\"status\":\"processed\",\"id\":\"e1\"}");
+  check "status_to_json Duplicate format" (status_to_json s_dup = "{\"status\":\"duplicate\",\"id\":\"e1\"}");
+  check "status_to_json Invalid format" (status_to_json s_inv = "{\"status\":\"invalid\",\"id\":\"e2\",\"error\":\"bad payload\"}")
+
+let test_wal_persistence_and_replay () : unit =
+  Printf.printf "\nTest Suite 7: Write-Ahead Log (WAL) Replay & Invariants\n";
+  let temp_wal = Filename.temp_file "events_test_" ".jsonl" in
+
+  (* 1. Append two processed events to WAL *)
+  let event1 : raw_event = { id = "evt-wal-1"; timestamp = 1000; payload = "payload_one" } in
+  let event2 : raw_event = { id = "evt-wal-2"; timestamp = 1001; payload = "payload_two" } in
+  append_event temp_wal event1;
+  append_event temp_wal event2;
+
+  check "WAL file was created" (Sys.file_exists temp_wal);
+
+  (* 2. Replay log on cold engine *)
+  let cold_engine = replay_log temp_wal empty in
+  check "Replayed engine has count 2" (count_seen cold_engine = 2);
+  check "Replayed engine recorded evt-wal-1" (is_seen "evt-wal-1" cold_engine);
+  check "Replayed engine recorded evt-wal-2" (is_seen "evt-wal-2" cold_engine);
+
+  (* 3. Invariant: Replayed engine rejects duplicate of already logged event *)
+  let dup_event : raw_event = { id = "evt-wal-1"; timestamp = 1005; payload = "re-submitted payload" } in
+  let engine_after_dup, state_dup = ingest cold_engine dup_event in
+
+  (match state_dup with
+  | Duplicate dup ->
+      check "Replayed engine correctly transitioned duplicate to Duplicate" (dup.id = "evt-wal-1")
+  | Processed proc ->
+      check (Printf.sprintf "Duplicate must not be Processed: %s" proc.id) false
+  | Received r ->
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
+  | Invalid inv ->
+      check (Printf.sprintf "Unexpected Invalid: %s" inv.id) false);
+
+  check "Engine seen count unaffected by duplicate" (count_seen engine_after_dup = 2);
+
+  (* 4. Ingest new event on top of replayed engine *)
+  let new_event : raw_event = { id = "evt-wal-3"; timestamp = 1006; payload = "payload_three" } in
+  let engine_final, state_new = ingest engine_after_dup new_event in
+
+  (match state_new with
+  | Processed proc ->
+      check "New event processed on top of replayed engine" (proc.id = "evt-wal-3")
+  | Received r ->
+      check (Printf.sprintf "Unexpected Received: %s" r.id) false
+  | Duplicate d ->
+      check (Printf.sprintf "Unexpected Duplicate: %s" d.id) false
+  | Invalid inv ->
+      check (Printf.sprintf "Unexpected Invalid: %s" inv.id) false);
+
+  check "Engine seen count incremented to 3" (count_seen engine_final = 3);
+
+  (* Clean up temporary WAL *)
+  Sys.remove temp_wal;
+  check "Temporary WAL cleaned up" (not (Sys.file_exists temp_wal))
+
 let () =
   Printf.printf "========================================\n";
   Printf.printf " OCaml Event Engine Verification Suite\n";
@@ -179,6 +270,8 @@ let () =
   test_empty_payload_rejection ();
   test_blank_event_id_rejection ();
   test_idempotence_and_stability ();
+  test_json_serde_and_status ();
+  test_wal_persistence_and_replay ();
   Printf.printf "\n========================================\n";
   Printf.printf " Result: %d / %d tests passed successfully.\n" !passed_tests !total_tests;
   Printf.printf "========================================\n"
