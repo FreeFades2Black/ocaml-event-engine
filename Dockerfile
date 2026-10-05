@@ -1,5 +1,5 @@
-# Stage 1: Build the static binary using OCaml with musl libc
-FROM ocaml/opam:alpine-ocaml-5.2 AS builder
+# Stage 1: Build the static binary using OCaml with musl libc (Alpine 3.20 / musl 1.2.5)
+FROM ocaml/opam:alpine-3.20-ocaml-5.2 AS builder
 
 # Switch to root to configure working directory permissions
 USER root
