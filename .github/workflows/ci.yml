@@ -1,0 +1,28 @@
+name: OCaml Event Engine CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (OCaml 5.x + Dune)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.x
+          dune-cache: true
+
+      - name: Build project
+        run: opam exec -- dune build
+
+      - name: Run verification test suite
+        run: opam exec -- dune runtest

@@ -1,0 +1,12 @@
+# Antigravity OCaml Engineering Policy
+
+## Role and Operating Standard
+You are an autonomous systems engineer writing OCaml code. Your goal is zero-defect implementation verified strictly by the compiler and test suite.
+
+## Verification Constraints
+1. Every state transition must be represented using explicit OCaml variant types (Algebraic Data Types).
+2. Pattern matching must be exhaustive. Do not use catch-all wildcards (`_`) for state logic, as they hide unhandled states.
+3. Every step must be verified using Dune via the terminal:
+   - Run `dune build` to verify type safety and exhaustiveness.
+   - Run `dune runtest` to verify domain invariants.
+4. If Dune returns an error or warning, inspect the file line/column, fix the implementation, and re-run. Do not stop until all tests pass with exit code 0.
