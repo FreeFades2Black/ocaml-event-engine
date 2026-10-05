@@ -308,6 +308,24 @@ Output:
 
 ---
 
+## 🌐 Production Fleet Deployment Matrix
+
+The compiled `ocaml-event-engine` container artifact operates as the standardized, upstream ingress gatekeeper across the entire multi-cloud production repository fleet:
+
+| Protected Repository | Integration Layer | Ingress Invariant Enforced | Downstream Impact |
+| :--- | :--- | :--- | :--- |
+| **[`repo-watchdog-agent`](https://github.com/FreeFades2Black/repo-watchdog-agent)** | `src/watchdog/gatekeeper.py` | Zero duplicate writes to `intel_cache.db` | **Token Cost Containment:** Completely eliminates redundant LLM prompt evaluations on repeated CVEs & release events. |
+| **[`edge-telemetry-lakehouse`](https://github.com/FreeFades2Black/edge-telemetry-lakehouse)** | `src/ingestion/gatekeeper_client.py` | Zero duplicate IoT sensor frames in Bronze Delta table | **ACID Invariant Protection:** Quarantines malformed machine payloads to `dead_letter_events.jsonl` prior to Spark micro-batch ingestion. |
+| **[`mosaic-health-cloud-architecture`](https://github.com/FreeFades2Black/mosaic-health-cloud-architecture)** | `.github/workflows/ci.yml` | Strict validation of Terraform HCL & ARM manifests | **Deployment Gate:** Halts CI/CD deployment immediately with exit code 1 if any infrastructure state is malformed. |
+
+### Why This Architecture Matters
+1. **Deterministic Containment:** Python runtimes, Spark jobs, and autonomous agent loops are no longer burdened with defensive baseline sanity checks. The edge gatekeeper guarantees bad data never crosses the boundary.
+2. **True Modularity:** If deduplication rules, timestamp windows, or schema constraints evolve, they are updated in one central location: the OCaml system specification (`SYSTEM_SPEC.md`). All downstream repositories automatically inherit updated guarantees upon pulling `ghcr.io/freefades2black/ocaml-event-engine:latest`.
+3. **Spec-Driven Precedent:** Combines mathematically rigorous Algebraic Data Types (ADTs) with zero wildcard catch-alls (`_`), ensuring the compiler proves zero runtime exceptions before any artifact is deployed to production.
+
+
+---
+
 ## 📜 Engineering Policy & Rules
 
 This project strictly adheres to the Autonomous Systems Engineering Policy defined in [.agents/rules](.agents/rules):
