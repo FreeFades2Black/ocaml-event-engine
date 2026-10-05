@@ -73,3 +73,41 @@ Without bounds, `events.jsonl` will grow monotonically over time, degrading cold
 - `val create_snapshot : engine -> snapshot_path:string -> (unit, string) result`
 - `val rotate_wal : config:compaction_config -> engine -> (engine, string) result`
 - `val recover : config:compaction_config -> (engine, string) result`
+
+## 6. Prometheus Observability & HTTP Exporter Specification (Phase 4)
+
+### Observability Motivation & Problem Statement
+To integrate the zero-dependency static musl engine into production monitoring and alerting ecosystems (Prometheus, Grafana, OpenTelemetry Collector) without adding third-party HTTP or metrics library dependencies, the engine exposes a standards-compliant Prometheus metrics endpoint over HTTP via OCaml standard library `Unix` sockets and background `Thread`.
+
+### Configuration Parameters
+- `--metrics-port <int>`: Port for HTTP Prometheus scrape server (default: `9100`).
+
+### Metric Invariants & Exposition Format
+- Protocol: HTTP/1.1 `GET /metrics` returning `Content-Type: text/plain; version=0.0.4`.
+- Counters:
+  - `events_processed_total`: Monotonically increasing counter for all events successfully admitted to the `Processed` state.
+  - `events_duplicate_total`: Monotonically increasing counter for rejected duplicate events discarded in the `Duplicate` state.
+  - `events_invalid_total`: Monotonically increasing counter for malformed JSON or invalid domain payloads in the `Invalid` state.
+- Format:
+  ```text
+  # HELP events_processed_total Total count of successfully processed events.
+  # TYPE events_processed_total counter
+  events_processed_total <val>
+  # HELP events_duplicate_total Total count of rejected duplicate events.
+  # TYPE events_duplicate_total counter
+  events_duplicate_total <val>
+  # HELP events_invalid_total Total count of malformed or invalid events.
+  # TYPE events_invalid_total counter
+  events_invalid_total <val>
+  ```
+- Non-blocking Execution: The HTTP metrics server runs on an independent background thread and never blocks or introduces latency into the primary stdin/stdout streaming event ingestion pipeline.
+
+### Required Metrics Module Interface (`lib/metrics.mli`)
+- `type counter = { name : string; help : string; value : int ref }`
+- `type metrics_registry = { processed : counter; duplicate : counter; invalid : counter }`
+- `val global_registry : metrics_registry`
+- `val inc_processed : unit -> unit`
+- `val inc_duplicate : unit -> unit`
+- `val inc_invalid : unit -> unit`
+- `val format_prometheus : metrics_registry -> string`
+- `val start_metrics_server : int -> unit`

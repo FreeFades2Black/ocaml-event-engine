@@ -1,5 +1,6 @@
 (library
  (name event_engine)
  (public_name ocaml_event_engine.event_engine)
- (libraries unix)
+ (wrapped false)
+ (libraries unix threads)
  (flags (:standard -warn-error +A-44)))

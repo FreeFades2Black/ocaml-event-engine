@@ -2,10 +2,11 @@
 
 [![OCaml 5.x](https://img.shields.io/badge/OCaml-5.x-orange.svg?style=flat-square&logo=ocaml)](https://ocaml.org)
 [![Dune 3.x](https://img.shields.io/badge/Build%20System-Dune%203.x-blue.svg?style=flat-square)](https://dune.build)
-[![CI Status](https://img.shields.io/badge/CI-Passing%20(57%2F57%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
+[![CI Status](https://img.shields.io/badge/CI-Passing%20(74%2F74%20Tests)-brightgreen.svg?style=flat-square)](#verification--test-execution)
 [![Zero Wildcards](https://img.shields.io/badge/Pattern%20Matching-100%25%20Exhaustive-blueviolet.svg?style=flat-square)](#engineering-policy--rules)
 [![WAL Compaction](https://img.shields.io/badge/Compaction-Atomic%20Snapshots%20%26%20Rotation-success.svg?style=flat-square)](#phase-3-wal-compaction--atomic-rotation)
-[![Docker Scratch](https://img.shields.io/badge/Container-1.64MB%20Scratch-blue.svg?style=flat-square)](#container-distribution--scratch-image)
+[![Prometheus Metrics](https://img.shields.io/badge/Metrics-Prometheus%20%2Fmetrics-orange.svg?style=flat-square&logo=prometheus)](#phase-4-prometheus-observability-server)
+[![Docker Scratch](https://img.shields.io/badge/Container-1.74MB%20Scratch-blue.svg?style=flat-square)](#container-distribution--scratch-image)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
 > High-integrity, strictly typed idempotent event ingestion engine built in OCaml 5.x and Dune. Implements an explicit four-state lifecycle with Algebraic Data Types (ADTs), purely functional immutable state transitions, zero-exception safety, and durable Write-Ahead Logging (WAL) for cold-boot crash recovery.
@@ -112,12 +113,14 @@ flowchart TD
 ├── lib/
 │   ├── dune                      # Strict library flags (-warn-error +A-44)
 │   ├── event_engine.mli          # Public interface with explicit ADT signatures
-│   └── event_engine.ml           # Pure state machine + JSON serde + WAL persistence
+│   ├── event_engine.ml           # Pure state machine + JSON serde + WAL persistence
+│   ├── metrics.mli               # Prometheus metrics registry and exporter interface
+│   └── metrics.ml                # Socket HTTP server and Prometheus format renderer
 ├── test/
 │   ├── dune                      # Test harness compilation rules
-│   └── test_event_engine.ml      # 39-assertion verification suite (unit + WAL replay)
+│   └── test_event_engine.ml      # 74-assertion verification suite (unit + WAL + metrics)
 ├── dune-project                  # Dune project manifest
-├── SYSTEM_SPEC.md                # Formal system specification (Phase 1 & Phase 2)
+├── SYSTEM_SPEC.md                # Formal system specification (Phases 1 - 4)
 ├── .gitignore                    # Build artifact exclusions
 └── README.md                     # Engineering documentation
 ```
@@ -259,8 +262,27 @@ Test Suite 8: WAL Rotation & Snapshot Recovery
   [PASS] Recovered engine seen count is at least 6
   [PASS] Ingesting snap-3 into recovered engine yields Duplicate
 
+Test Suite 9: Prometheus Metrics Exporter
+  [PASS] inc_processed increments processed counter by 2
+  [PASS] inc_duplicate increments duplicate counter by 1
+  [PASS] inc_invalid increments invalid counter by 1
+  [PASS] format_prometheus contains HELP for processed
+  [PASS] format_prometheus contains TYPE for processed
+  [PASS] format_prometheus contains value for processed
+  [PASS] format_prometheus contains HELP for duplicate
+  [PASS] format_prometheus contains TYPE for duplicate
+  [PASS] format_prometheus contains value for duplicate
+  [PASS] format_prometheus contains HELP for invalid
+  [PASS] format_prometheus contains TYPE for invalid
+  [PASS] format_prometheus contains value for invalid
+  [PASS] HTTP response status is 200 OK
+  [PASS] HTTP response contains Prometheus content-type header
+  [PASS] HTTP response contains processed counter
+  [PASS] HTTP response contains duplicate counter
+  [PASS] HTTP response contains invalid counter
+
 ========================================
- Result: 57 / 57 tests passed successfully.
+ Result: 74 / 74 tests passed successfully.
 ========================================
 ```
 
@@ -280,17 +302,58 @@ To prevent unbounded log file growth while guaranteeing zero data loss, the engi
 
 ---
 
+## 📊 Phase 4: Prometheus Observability Server
+
+To enable production-grade telemetry and real-time monitoring across Kubernetes and cloud environments without introducing external web framework dependencies, the engine embeds a zero-dependency HTTP Prometheus metrics exporter:
+
+- **Zero Third-Party Dependencies:** Implemented exclusively via OCaml standard library `Unix` sockets and preemptive background `Thread`.
+- **Non-Blocking Architecture:** HTTP request handling runs on an independent background thread and never blocks or introduces latency into the high-throughput stdin/stdout streaming event pipeline.
+- **Resilient Connection Handling:** Employs socket receive timeouts (`SO_RCVTIMEO`) and header draining to prevent descriptor leaks or TCP RST packet aborts.
+- **Port Configuration:** Listens on port `9100` by default; configurable via `--metrics-port <port>` (or pass `0` to disable the HTTP listener for batch one-off runs).
+
+### Exposed Prometheus Metrics (`/metrics`)
+
+| Metric Name | Type | Description |
+| :--- | :--- | :--- |
+| `events_processed_total` | Counter | Total count of unique, valid events successfully admitted to `Processed`. |
+| `events_duplicate_total` | Counter | Total count of duplicate events identified and discarded in `Duplicate`. |
+| `events_invalid_total` | Counter | Total count of malformed JSON or invalid schema events rejected into `Invalid`. |
+
+### Live Scrape Example
+
+```bash
+# Query the live Prometheus scrape endpoint
+curl -s http://localhost:9100/metrics
+```
+
+**Prometheus Exposition Format:**
+```text
+# HELP events_processed_total Total count of successfully processed events.
+# TYPE events_processed_total counter
+events_processed_total 1420
+# HELP events_duplicate_total Total count of rejected duplicate events.
+# TYPE events_duplicate_total counter
+events_duplicate_total 315
+# HELP events_invalid_total Total count of malformed or invalid events.
+# TYPE events_invalid_total counter
+events_invalid_total 12
+```
+
+---
+
 ## 🐳 Container Distribution & Scratch Image
 
 The engine compiles via musl libc into a static, zero-dependency native ELF binary and packages onto an empty `scratch` image with **zero OS bloat**:
 
 - **Registry Image:** `ghcr.io/freefades2black/ocaml-event-engine:latest`
-- **Total Image Size:** **1.64 MB** disk footprint (compressed layer: **480 kB**)
+- **Total Image Size:** **1.74 MB** disk footprint (compressed layer: **507 kB**)
+- **Exposed Ports:** `9100/tcp` (Prometheus metrics)
 - **Dynamic Linker Dependencies:** Zero (`Not a valid dynamic program`)
 
-### Run via Docker
+### Run via Docker with Ingress & Observability
 ```bash
-docker run --rm -i ghcr.io/freefades2black/ocaml-event-engine:latest << 'EOF'
+# Run with metrics port exposed
+docker run --rm -i -p 9100:9100 ghcr.io/freefades2black/ocaml-event-engine:latest << 'EOF'
 {"id":"evt-001","timestamp":1728100000,"payload":"sensor_payload_active"}
 {"id":"evt-001","timestamp":1728100005,"payload":"sensor_payload_active"}
 {"id":"","timestamp":1728100010,"payload":"invalid_record"}

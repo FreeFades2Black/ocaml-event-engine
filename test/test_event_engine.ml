@@ -1,4 +1,5 @@
 open Event_engine
+open Metrics
 
 let total_tests = ref 0
 let passed_tests = ref 0
@@ -351,6 +352,90 @@ let test_wal_rotation_and_snapshot () : unit =
   if Sys.file_exists snapshot_path then Sys.remove snapshot_path;
   if Sys.file_exists archive_path then Sys.remove archive_path;
   Unix.rmdir temp_base
+ 
+let string_contains haystack needle =
+  let len_h = String.length haystack in
+  let len_n = String.length needle in
+  if len_n > len_h then false
+  else
+    let rec aux idx =
+      if idx + len_n > len_h then false
+      else if String.sub haystack idx len_n = needle then true
+      else aux (idx + 1)
+    in
+    aux 0
+
+let test_prometheus_metrics () : unit =
+  Printf.printf "\nTest Suite 9: Prometheus Metrics Exporter\n";
+  let initial_proc = !(global_registry.processed.value) in
+  let initial_dup = !(global_registry.duplicate.value) in
+  let initial_inv = !(global_registry.invalid.value) in
+
+  inc_processed ();
+  inc_processed ();
+  check "inc_processed increments processed counter by 2" (!(global_registry.processed.value) = initial_proc + 2);
+
+  inc_duplicate ();
+  check "inc_duplicate increments duplicate counter by 1" (!(global_registry.duplicate.value) = initial_dup + 1);
+
+  inc_invalid ();
+  check "inc_invalid increments invalid counter by 1" (!(global_registry.invalid.value) = initial_inv + 1);
+
+  let formatted = format_prometheus global_registry in
+  check "format_prometheus contains HELP for processed"
+    (string_contains formatted "# HELP events_processed_total Total count of successfully processed events.");
+  check "format_prometheus contains TYPE for processed"
+    (string_contains formatted "# TYPE events_processed_total counter");
+  check "format_prometheus contains value for processed"
+    (string_contains formatted (Printf.sprintf "events_processed_total %d" (initial_proc + 2)));
+
+  check "format_prometheus contains HELP for duplicate"
+    (string_contains formatted "# HELP events_duplicate_total Total count of rejected duplicate events.");
+  check "format_prometheus contains TYPE for duplicate"
+    (string_contains formatted "# TYPE events_duplicate_total counter");
+  check "format_prometheus contains value for duplicate"
+    (string_contains formatted (Printf.sprintf "events_duplicate_total %d" (initial_dup + 1)));
+
+  check "format_prometheus contains HELP for invalid"
+    (string_contains formatted "# HELP events_invalid_total Total count of malformed or invalid events.");
+  check "format_prometheus contains TYPE for invalid"
+    (string_contains formatted "# TYPE events_invalid_total counter");
+  check "format_prometheus contains value for invalid"
+    (string_contains formatted (Printf.sprintf "events_invalid_total %d" (initial_inv + 1)));
+
+  (* Test HTTP socket endpoint on test port *)
+  let test_port = 19100 in
+  start_metrics_server test_port;
+  Thread.delay 0.05;
+
+  let client_sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
+  let server_addr = Unix.ADDR_INET (Unix.inet_addr_loopback, test_port) in
+  Unix.connect client_sock server_addr;
+
+  let out_ch = Unix.out_channel_of_descr client_sock in
+  let in_ch = Unix.in_channel_of_descr client_sock in
+  output_string out_ch "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n";
+  flush out_ch;
+
+  let status_line = input_line in_ch in
+  check "HTTP response status is 200 OK" (string_contains status_line "200 OK");
+
+  let rec read_all ch acc =
+    match try Some (input_line ch) with _ -> None with
+    | None -> acc
+    | Some line -> read_all ch (acc ^ "\n" ^ line)
+  in
+  let http_body = read_all in_ch "" in
+  close_in in_ch;
+
+  check "HTTP response contains Prometheus content-type header"
+    (string_contains http_body "Content-Type: text/plain; version=0.0.4");
+  check "HTTP response contains processed counter"
+    (string_contains http_body "events_processed_total");
+  check "HTTP response contains duplicate counter"
+    (string_contains http_body "events_duplicate_total");
+  check "HTTP response contains invalid counter"
+    (string_contains http_body "events_invalid_total")
 
 let () =
   Printf.printf "========================================\n";
@@ -364,6 +449,7 @@ let () =
   test_json_serde_and_status ();
   test_wal_persistence_and_replay ();
   test_wal_rotation_and_snapshot ();
+  test_prometheus_metrics ();
   Printf.printf "\n========================================\n";
   Printf.printf " Result: %d / %d tests passed successfully.\n" !passed_tests !total_tests;
   Printf.printf "========================================\n"

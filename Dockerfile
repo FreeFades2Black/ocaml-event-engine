@@ -37,5 +37,8 @@ FROM scratch
 # Copy only the compiled static executable
 COPY --from=builder /ocaml-event-engine /ocaml-event-engine
 
+# Expose Prometheus HTTP metrics port
+EXPOSE 9100
+
 # Expose standard execution entrypoint
 ENTRYPOINT ["/ocaml-event-engine"]

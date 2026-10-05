@@ -1,4 +1,5 @@
 open Event_engine
+open Metrics
 
 let config : compaction_config = {
   max_log_bytes = 10_485_760;
@@ -16,6 +17,7 @@ let rec process_loop (engine : engine) : unit =
         else
           match event_of_json trimmed with
           | Error err ->
+              inc_invalid ();
               let inv_state = Invalid { id = ""; error = err } in
               print_endline (status_to_json inv_state);
               flush stdout;
@@ -25,6 +27,7 @@ let rec process_loop (engine : engine) : unit =
               let engine_after_commit =
                 match res_state with
                 | Processed proc ->
+                    inc_processed ();
                     append_event wal_path
                       {
                         id = proc.id;
@@ -36,8 +39,12 @@ let rec process_loop (engine : engine) : unit =
                       | Ok rot_eng -> rot_eng
                       | Error _ -> updated_engine
                     else updated_engine
-                | Duplicate { id = _; timestamp = _ } -> updated_engine
-                | Invalid { id = _; error = _ } -> updated_engine
+                | Duplicate { id = _; timestamp = _ } ->
+                    inc_duplicate ();
+                    updated_engine
+                | Invalid { id = _; error = _ } ->
+                    inc_invalid ();
+                    updated_engine
                 | Received { id = _; timestamp = _; payload = _ } ->
                     updated_engine
               in
@@ -50,6 +57,15 @@ let rec process_loop (engine : engine) : unit =
       ()
 
 let () =
+  let metrics_port = ref 9100 in
+  Arg.parse
+    [ ("--metrics-port", Arg.Set_int metrics_port, "Prometheus metrics port (default 9100, 0 to disable)") ]
+    (fun _ -> ())
+    "Usage: ocaml-event-engine [--metrics-port <port>]";
+
+  if !metrics_port > 0 then
+    start_metrics_server !metrics_port;
+
   let initial_engine =
     match recover ~config with
     | Ok eng -> eng

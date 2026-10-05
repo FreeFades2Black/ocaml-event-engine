@@ -1,6 +1,6 @@
 (executable
  (name main)
  (public_name ocaml-event-engine)
- (libraries event_engine)
+ (libraries event_engine unix threads)
  (flags (-ccopt -static -ccopt -no-pie))
  (link_flags (-ccopt -static -ccopt -no-pie)))
